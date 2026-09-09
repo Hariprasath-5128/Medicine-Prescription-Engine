@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/raw/*
+data/processed/*
+data/chroma/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+artifacts/
+*.bin
+*.safetensors
+.env
+kaggle.json
+.pytest_cache/

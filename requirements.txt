@@ -1,0 +1,32 @@
+# Core ML. On Blackwell (RTX 50-series, sm_120) install torch from the cu128
+# index FIRST, otherwise bitsandbytes and CUDA kernels misbehave:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.7.0
+transformers>=4.44.0
+peft>=0.10.0          # use_dora requires >=0.10
+trl>=0.9.0
+accelerate>=0.30.0
+bitsandbytes>=0.43.0
+datasets>=2.19.0
+sentencepiece>=0.2.0
+
+# Retrieval
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# Data
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+kaggle>=1.6.0
+pyyaml>=6.0
+
+# Serving
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0.0
+streamlit>=1.35.0
+
+# Evaluation
+rouge-score>=0.1.2
+pytest>=8.0.0

@@ -1,0 +1,162 @@
+# Medicine Prescription Engine - central configuration.
+#
+# Model choices are pinned to what a 12 GB RTX 5070 (Blackwell, sm_120) can
+# actually hold. See docs/IMPLEMENTATION_PLAN.md for the VRAM arithmetic.
+
+paths:
+  raw: data/raw
+  processed: data/processed
+  artifacts: artifacts
+  # Evidence index copied from the SERA project (56,743 chunks, bge-m3).
+  chroma: data/chroma
+
+evidence:
+  # Copied from C:/Projects/SERA/data/chroma - see scripts/00_setup_evidence_db.py
+  collection: raw_chunks
+  # MUST match the model SERA used to build the index; a mismatch silently
+  # returns garbage neighbours rather than erroring.
+  embedding_model: BAAI/bge-m3
+  # bge-m3 is 2.2 GB. On a 4 GB card it competes with the LLM, so default to CPU
+  # and let the caller override when the 12 GB box is in use.
+  embedding_device: cpu
+  top_k: 5
+  # Cosine distance above which a chunk is treated as unrelated. The corpus is
+  # disease-information text, so a drug-specific query often has NO good match -
+  # returning nothing is correct and honest here.
+  max_distance: 0.55
+
+# ---------------------------------------------------------------------------
+# Stage 1: conversational medical QA (DoRA fine-tune)
+# ---------------------------------------------------------------------------
+qa_model:
+  # Llama-3-8B-UltraMedical beats Meditron-70B on MedQA/MedMCQA/PubMedQA.
+  # Meditron-7B is Llama-2-era and scored poorly in independent 2026 evals.
+  base: TsinghuaC3I/Llama-3-8B-UltraMedical
+  # Fallback that trains comfortably in 12 GB with headroom to spare.
+  base_small: microsoft/Phi-3-mini-4k-instruct
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_compute_dtype: bfloat16
+  # Double quantisation saves ~0.4 GB at negligible quality cost.
+  bnb_4bit_use_double_quant: true
+
+  dora:
+    use_dora: true          # requires peft >= 0.10
+    # r=32 on 12 GB: doubling rank costs ~0.3 GB and roughly +1% on medical
+    # benchmarks. Keep alpha = 2*r so the effective scale is unchanged.
+    r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    bias: none
+    task_type: CAUSAL_LM
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+  # Instruction data for the DoRA fine-tune. UltraMedical (NeurIPS 2024 D&B
+  # Spotlight) is the dataset the base model itself was trained on: 409,593 rows
+  # aggregating MedQA, MedMCQA, PubMedQA, TextBookQA, ChatDoctor and MedQuAD.
+  # Audited at 96.07% distinct questions - contrast the rejected 50k file at
+  # 0.04%. See scripts/01_audit_dataset.py.
+  dataset:
+    name: TsinghuaC3I/UltraMedical
+    split: train
+    # Exam / Open-End / Literature. Exam rows are USMLE-style vignettes whose
+    # answer is a bare letter, which teaches nothing about explaining medicine -
+    # so default to the two prose types.
+    keep_types: [Open-End, Literature]
+    # Drop the ~30 degenerate rows (one-word answers like "No").
+    min_question_words: 5
+    min_answer_words: 10
+    # 0 = use everything kept (178,066). The trainer measures throughput and
+    # subsamples to fit `budget_hours`, so leaving this at 0 is safe.
+    max_rows: 0
+    val_fraction: 0.02
+
+  train:
+    # 8B QLoRA at seq 2048 peaks at 14-15 GB and OOMs a 12 GB card.
+    # 1024 with batch 1 + accumulation 16 keeps peak near 9-10 GB.
+    max_seq_length: 1024
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    gradient_checkpointing: true
+    num_train_epochs: 2
+    learning_rate: 1.0e-4
+    lr_scheduler_type: cosine
+    warmup_ratio: 0.03
+    optim: paged_adamw_8bit   # paged optimiser survives VRAM spikes
+    bf16: true
+    # NEFTune adds uniform noise to input embeddings during training. It costs
+    # no memory and reliably improves instruction-following quality.
+    neftune_noise_alpha: 5
+    logging_steps: 25
+    save_strategy: epoch
+    output_dir: artifacts/qa-dora
+    # Wall-clock ceiling for the QDoRA stage. With ~1 day total, the split is
+    # roughly: recommender 3 h, QA 14 h, evaluation + serving the remainder.
+    budget_hours: 14.0
+
+# ---------------------------------------------------------------------------
+# Stage 2: drug-condition recommender (trained on REAL, varied data)
+# ---------------------------------------------------------------------------
+recommender:
+  # BioLinkBERT-large (340M) is SOTA on the BLURB biomedical benchmark and on
+  # MedQA-USMLE. It is pretrained on PubMed *with citation links*, so it models
+  # relations between documents rather than each abstract in isolation.
+  #
+  # Swap `encoder` for any entry in encoder_options. The 4 GB dev card can only
+  # train the base models; large needs the 12 GB box (see docs).
+  encoder: michiyasunaga/BioLinkBERT-large
+  encoder_options:
+    # ~340M params, ~9 GB training VRAM at batch 8 + fp16. Best quality.
+    large: michiyasunaga/BioLinkBERT-large
+    # ~110M, ~3 GB. Same family, fits 4 GB - use to iterate quickly.
+    base: michiyasunaga/BioLinkBERT-base
+    # ~110M, ~3 GB. The previous default; PubMed abstracts + full text.
+    biomedbert: microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext
+
+  dataset: drug_reviews          # UCI Drug Review: 161k rows, 3,436 drugs, 884 conditions
+  min_condition_count: 200       # drop long-tail conditions with too few examples
+  max_length: 256
+  # Measured: BioLinkBERT-large is 6.71 GB at batch 8 / seq 256, so batch 16
+  # fits 12 GB with headroom. On a 4 GB card pass --batch-size 4 --fp16.
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  epochs: 3
+  # Wall-clock ceiling. The script measures real throughput and subsamples if
+  # the full run would not fit - see src/utils/budget.py.
+  budget_hours: 3.0
+  # 1e-5 for large: the 2e-5 that suits a base model destabilises 340M params.
+  learning_rate: 1.0e-5
+  warmup_ratio: 0.06
+  weight_decay: 0.01
+  # Stop when val macro-F1 stops improving, rather than always running `epochs`.
+  early_stopping_patience: 2
+  output_dir: artifacts/recommender
+  # Deduplicate before splitting. 48,968 of the 161k reviews are exact copies;
+  # leaving them in re-creates the leakage that sank the 50k dataset.
+  drop_duplicate_text: true
+  split_by: condition_stratified
+
+api:
+  host: 127.0.0.1
+  port: 8000
+
+ui:
+  port: 8501
+
+safety:
+  # Rendered on every response. This is decision support, not a prescription.
+  disclaimer: >-
+    Research and educational decision support only. Output is generated by
+    statistical models and is NOT a prescription. It must be reviewed by a
+    qualified clinician before any clinical use.
+  # Conditions where a wrong "reassuring" answer is dangerous; always escalate.
+  red_flag_terms:
+    - chest pain
+    - shortness of breath
+    - suicidal
+    - stroke
+    - anaphylaxis
+    - severe bleeding
+    - loss of consciousness
+    - meningitis
+    - sepsis
