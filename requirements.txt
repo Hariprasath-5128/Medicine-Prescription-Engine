@@ -1,12 +1,27 @@
-# Core ML. On Blackwell (RTX 50-series, sm_120) install torch from the cu128
-# index FIRST, otherwise bitsandbytes and CUDA kernels misbehave:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu128
-torch>=2.7.0
+# torch is deliberately NOT pinned in this file.
+#
+# Listing it here breaks the CUDA install: `pip install -r requirements.txt`
+# pulls the default PyPI wheel (CPU or cu121), and a later
+# `pip install torch --index-url .../cu128` is then a NO-OP, because the
+# installed version already satisfies the requirement. The result is a torch
+# that silently runs on CPU - an 8-hour job becomes a week.
+#
+# Install torch FIRST, from the index matching your GPU:
+#   Blackwell / RTX 50-series (sm_120):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   Ampere / Ada (RTX 30xx / 40xx):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# Then verify: python scripts/04_train_qa_dora.py --check
 transformers>=4.44.0
 peft>=0.10.0          # use_dora requires >=0.10
 trl>=0.9.0
 accelerate>=0.30.0
-bitsandbytes>=0.43.0
+# >=0.45.3 ships the CUDA 12.8 / sm_120 wheels that Blackwell needs. Windows
+# support for 4-bit on sm_120 has been rocky (bitsandbytes issue #1937), so
+# `04_train_qa_dora.py --check` now actually quantizes a tensor to prove it
+# works before an 8-hour run starts.
+bitsandbytes>=0.45.3
 datasets>=2.19.0
 sentencepiece>=0.2.0
 

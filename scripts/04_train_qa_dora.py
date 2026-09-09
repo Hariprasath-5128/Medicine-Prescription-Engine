@@ -91,6 +91,29 @@ def preflight(require_gpu: bool = True) -> dict:
     if tuple(int(x) for x in peft.__version__.split(".")[:2]) < (0, 10):
         sys.exit("\n!! use_dora requires peft >= 0.10 - pip install -U peft")
     print(" (DoRA supported)")
+
+    # Actually quantize something. Version numbers do not prove the kernels
+    # work: 4-bit on Blackwell/Windows has been unreliable (bitsandbytes issue
+    # #1937), and the failure otherwise surfaces only once training starts.
+    import bitsandbytes as bnb
+
+    print(f"bitsandbytes {bnb.__version__}", end="")
+    try:
+        from bitsandbytes.nn import Linear4bit
+
+        layer = Linear4bit(64, 64, compute_dtype=torch.bfloat16).cuda()
+        probe = torch.randn(2, 64, dtype=torch.bfloat16, device="cuda")
+        assert layer(probe).shape == (2, 64)
+        print(" (4-bit kernels verified on this GPU)")
+        info["bnb_4bit_ok"] = True
+    except Exception as exc:
+        print(f"\n!! 4-bit quantization FAILED: {type(exc).__name__}: {exc}")
+        print("   QDoRA cannot run without it. Options:")
+        print("     pip install -U bitsandbytes    (>=0.45.3 ships sm_120 wheels)")
+        print("     or use a smaller model that fits unquantized: --small")
+        info["bnb_4bit_ok"] = False
+        if require_gpu:
+            sys.exit(1)
     return info
 
 
