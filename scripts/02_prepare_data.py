@@ -38,6 +38,25 @@ def load_config() -> dict:
         return yaml.safe_load(fh)
 
 
+# Conditions that are the same clinical entity under different labels. Measured
+# on the training data: "Depression" and "Major Depressive Disorde" share 100%
+# of their drug vocabulary, so no model can separate them - and each such pair
+# costs TWO macro-F1 classes, since both score badly. Merging removes 6
+# unwinnable classes and pools their data.
+CONDITION_ALIASES = {
+    "Major Depressive Disorde": "Depression",
+    "Anxiety and Stress": "Anxiety",
+    "Generalized Anxiety Disorde": "Anxiety",
+    "Social Anxiety Disorde": "Anxiety",
+    "Emergency Contraception": "Birth Control",
+    "Chronic Pain": "Pain",
+}
+
+# Not a clinical condition - a scrape artefact. Keeping it teaches the model to
+# predict a label that means nothing.
+CONDITION_BLOCKLIST = {"Not Listed / Othe"}
+
+
 def _clean_review(text: str) -> str:
     """Strip the HTML entities and wrapping quotes the UCI export is full of."""
     text = str(text)
@@ -86,6 +105,14 @@ def build_recommender_data(cfg: dict) -> None:
         before = len(df)
         df = df.drop_duplicates(subset=["review"])
         print(f"after dedup        : {len(df):,}  (removed {before - len(df):,} copies)")
+
+    # Merge label variants and drop the junk class before counting, so the
+    # min_condition_count threshold sees the pooled totals.
+    before = df["condition"].nunique()
+    df["condition"] = df["condition"].replace(CONDITION_ALIASES)
+    df = df[~df["condition"].isin(CONDITION_BLOCKLIST)]
+    print(f"after merging aliases: {df['condition'].nunique()} conditions "
+          f"(from {before}; dropped {sorted(CONDITION_BLOCKLIST)})")
 
     counts = df["condition"].value_counts()
     keep = counts[counts >= rc["min_condition_count"]].index

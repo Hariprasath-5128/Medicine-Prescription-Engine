@@ -115,17 +115,33 @@ recommender:
 
   dataset: drug_reviews          # UCI Drug Review: 161k rows, 3,436 drugs, 884 conditions
   min_condition_count: 200       # drop long-tail conditions with too few examples
-  max_length: 256
+  max_length: 384
   # Measured: BioLinkBERT-large is 6.71 GB at batch 8 / seq 256, so batch 16
   # fits 12 GB with headroom. On a 4 GB card pass --batch-size 4 --fp16.
   batch_size: 16
   gradient_accumulation_steps: 1
-  epochs: 3
+  epochs: 5
   # Wall-clock ceiling. The script measures real throughput and subsamples if
   # the full run would not fit - see src/utils/budget.py.
   budget_hours: 3.0
   # 1e-5 for large: the 2e-5 that suits a base model destabilises 340M params.
   learning_rate: 1.0e-5
+
+  # --- macro-F1 levers -----------------------------------------------------
+  # 50 of the 90 conditions have <400 train rows. They are only 16% of test
+  # rows but 55.6% of macro-F1 weight, so the rare classes decide the score.
+  #
+  # Class-balanced loss weights (Cui et al. 2019): w = (1-beta)/(1-beta^n).
+  # beta=0 is unweighted; 0.999 weights roughly by 1/sqrt(n); 0.9999 is
+  # aggressive. Set 0 to disable.
+  class_balanced_beta: 0.999
+  # Oversample rare conditions in the sampler as well as the loss. sqrt keeps
+  # it gentler than full inversion, which overfits 170-row classes.
+  sampler: sqrt_balanced      # none | sqrt_balanced | balanced
+  # Reviews are longer than 256 tokens; truncating loses the drug mentions
+  # that identify a condition. p95 of review length is ~330 tokens.
+  # (max_length below was raised from 256 for the same reason.)
+  label_smoothing: 0.05
   warmup_ratio: 0.06
   weight_decay: 0.01
   # Stop when val macro-F1 stops improving, rather than always running `epochs`.

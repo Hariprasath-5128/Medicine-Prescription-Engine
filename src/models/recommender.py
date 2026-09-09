@@ -39,13 +39,18 @@ class DrugRecommender(nn.Module):
     """PubMedBERT encoder with a condition head and a drug-ranking head."""
 
     def __init__(self, encoder_name: str, n_conditions: int, n_drugs: int,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1, label_smoothing: float = 0.0):
         super().__init__()
+        self.label_smoothing = label_smoothing
         self.encoder = AutoModel.from_pretrained(encoder_name)
         hidden = self.encoder.config.hidden_size
         self.dropout = nn.Dropout(dropout)
         self.condition_head = nn.Linear(hidden, n_conditions)
         self.drug_head = nn.Linear(hidden, n_drugs)
+
+    def set_class_weights(self, weights: torch.Tensor) -> None:
+        """Per-condition loss weights, registered so .to(device) moves them."""
+        self.register_buffer("class_weights", weights)
 
     def forward(self, input_ids, attention_mask, condition_labels=None,
                 drug_labels=None):
@@ -61,7 +66,14 @@ class DrugRecommender(nn.Module):
 
         loss = None
         if condition_labels is not None:
-            loss = nn.functional.cross_entropy(condition_logits, condition_labels)
+            # Class weights + label smoothing both target macro-F1: the rare
+            # conditions carry most of that metric's weight, and smoothing stops
+            # the head becoming over-confident on the few dominant classes.
+            loss = nn.functional.cross_entropy(
+                condition_logits, condition_labels,
+                weight=getattr(self, "class_weights", None),
+                label_smoothing=self.label_smoothing,
+            )
             if drug_labels is not None:
                 # Equal weighting: both objectives share one encoder, and the
                 # drug head is the harder task, so it must not be drowned out.
