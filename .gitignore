@@ -26,3 +26,9 @@ kaggle.json
 # Evidence index: rebuilt by scripts/00_setup_evidence_db.py from SERA
 # in under a minute, so it is not worth 632 MB of LFS quota.
 data/chroma/
+
+# Next.js frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.playwright-mcp/

@@ -105,6 +105,10 @@ class RecommenderPipeline:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         self.model = DrugRecommender(encoder_name, len(self.conditions), len(self.drugs))
         state = torch.load(self.model_dir / "pytorch_model.bin", map_location="cpu")
+        # `class_weights` is a training-only buffer (see set_class_weights); a
+        # model built for inference never registers it, so drop it rather than
+        # failing the load on an unexpected key.
+        state.pop("class_weights", None)
         self.model.load_state_dict(state)
         self.model.to(self.device).eval()
 

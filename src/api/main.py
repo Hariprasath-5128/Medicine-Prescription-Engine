@@ -11,12 +11,14 @@ Endpoints
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,6 +69,17 @@ class RecommendRequest(BaseModel):
     top_k_drugs: int = Field(5, ge=1, le=20)
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """assistant-ui posts the whole thread; only the last user turn is used."""
+
+    messages: list[ChatMessage]
+
+
 class EvidenceRequest(BaseModel):
     query: str = Field(..., min_length=3)
     top_k: int = Field(5, ge=1, le=20)
@@ -94,6 +107,40 @@ def health() -> dict:
 @app.post("/recommend")
 def recommend(req: RecommendRequest) -> dict:
     return get_pipeline().run(req.text, top_k_drugs=req.top_k_drugs).to_dict()
+
+
+@app.post("/chat")
+def chat(req: ChatRequest) -> StreamingResponse:
+    """Conversational wrapper over the pipeline, streamed for the chat UI.
+
+    Streams newline-delimited JSON: `{"type": "text", ...}` chunks build the
+    visible answer, then a single `{"type": "data", ...}` frame carries the
+    structured recommendation so the UI can render evidence cards and
+    citations rather than re-parsing prose.
+    """
+    user_turns = [m for m in req.messages if m.role == "user"]
+    if not user_turns:
+        raise HTTPException(status_code=400, detail="no user message in thread")
+    text = user_turns[-1].content.strip()
+    if len(text) < 3:
+        raise HTTPException(status_code=400, detail="message too short")
+
+    def stream():
+        try:
+            rec = get_pipeline().run(text)
+        except HTTPException as exc:
+            yield json.dumps({"type": "text", "text": str(exc.detail)}) + "\n"
+            return
+        except Exception as exc:  # surface the failure in the thread
+            yield json.dumps({"type": "text", "text": f"Error: {exc}"}) + "\n"
+            return
+
+        # Word-by-word so the UI shows progressive output rather than a jump.
+        for word in rec.render().split(" "):
+            yield json.dumps({"type": "text", "text": word + " "}) + "\n"
+        yield json.dumps({"type": "data", "payload": rec.to_dict()}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 @app.post("/evidence")
