@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-SERA_CHROMA = Path("C:/Projects/SERA/data/chroma")
+SERA_CHROMA = Path("D:/Projects/Medicine-Prescription-Engine/data/chroma")
 ROOT = Path(__file__).resolve().parents[1]
 
 
