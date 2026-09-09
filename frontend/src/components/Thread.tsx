@@ -6,9 +6,10 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
 } from "@assistant-ui/react";
-import { ArrowDown, Copy, RefreshCw, Send, Square, Stethoscope } from "lucide-react";
+import { ArrowDown, Copy, FileDown, RefreshCw, Send, Square, Stethoscope } from "lucide-react";
 import * as React from "react";
 import { RecommendationCard } from "@/components/RecommendationCard";
+import { ReportDocument } from "@/components/ReportDocument";
 import { Button } from "@/components/ui/primitives";
 import { useLatestRecommendation } from "@/lib/runtime";
 import { cn } from "@/lib/utils";
@@ -26,6 +27,7 @@ const SUGGESTIONS = [
  * because the card exposes the citations the text can only describe.
  */
 function AssistantMessage() {
+  const [showReport, setShowReport] = React.useState(false);
   // The structured payload arrives on the same stream as the prose. Subscribing
   // to the store keeps this in sync without threading state through the runtime
   // or depending on version-specific message-state hooks.
@@ -63,7 +65,22 @@ function AssistantMessage() {
               <RefreshCw className="h-3.5 w-3.5" />
             </Button>
           </ActionBarPrimitive.Reload>
+          {data && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowReport(true)}
+              aria-label="Generate report document"
+            >
+              <FileDown className="h-3.5 w-3.5" />
+              Report
+            </Button>
+          )}
         </ActionBarPrimitive.Root>
+
+        {showReport && data && (
+          <ReportDocument data={data} onClose={() => setShowReport(false)} />
+        )}
       </div>
     </MessagePrimitive.Root>
   );

@@ -121,3 +121,28 @@ body {
     animation: none;
   }
 }
+
+/* Print: the report overlay becomes the whole document. Everything else is
+   hidden via `print:hidden`, so the browser's Save-as-PDF yields a clean
+   letter-sized report with no app chrome. */
+@media print {
+  @page {
+    size: letter;
+    margin: 0.6in;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+    height: auto !important;
+  }
+
+  /* Keep a citation from splitting across a page break mid-quote. */
+  .break-inside-avoid {
+    break-inside: avoid;
+  }
+
+  a[href]::after {
+    content: "";
+  }
+}

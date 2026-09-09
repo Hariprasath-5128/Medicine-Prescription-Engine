@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -141,6 +141,79 @@ def chat(req: ChatRequest) -> StreamingResponse:
         yield json.dumps({"type": "data", "payload": rec.to_dict()}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+
+# Uploads are held in memory and never written to disk: these are patient
+# notes, and the pipeline only needs the text.
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json"}
+
+
+def _extract_pdf(raw: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError:  # pragma: no cover - dependency is in requirements
+        raise HTTPException(
+            status_code=503,
+            detail="PDF support needs pypdf: pip install pypdf",
+        )
+
+    import io
+
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"could not read PDF: {exc}")
+
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)) -> dict:
+    """Extract plain text from an uploaded note so it can seed a prescription.
+
+    Accepts .txt/.md/.csv/.json and .pdf. Returns the text rather than a
+    recommendation, so the caller can review and edit before running the
+    pipeline - a scanned PDF often extracts badly, and silently prescribing
+    from garbled text would be worse than showing it.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file is {len(raw) / 1e6:.1f} MB; limit is "
+                   f"{MAX_UPLOAD_BYTES / 1e6:.0f} MB",
+        )
+
+    name = (file.filename or "upload").lower()
+    suffix = Path(name).suffix
+
+    if suffix == ".pdf":
+        text = _extract_pdf(raw)
+    elif suffix in TEXT_SUFFIXES or not suffix:
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported type '{suffix}'. Use PDF or a text file.",
+        )
+
+    text = " ".join(text.split())
+    if len(text) < 10:
+        raise HTTPException(
+            status_code=422,
+            detail="almost no text extracted - the PDF may be a scan, which "
+                   "needs OCR. Paste the notes manually instead.",
+        )
+
+    return {
+        "filename": file.filename,
+        "characters": len(text),
+        "words": len(text.split()),
+        "text": text,
+    }
 
 
 @app.post("/evidence")

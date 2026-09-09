@@ -1,5 +1,6 @@
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import { useSyncExternalStore } from "react";
+import { pushRecommendation } from "./store";
 import { API_BASE, type Recommendation } from "./utils";
 
 /**
@@ -99,6 +100,9 @@ export const prescriptionAdapter: ChatModelAdapter = {
         } else if (frame.type === "data" && frame.payload) {
           recommendationStore.set(query, frame.payload);
           publish(frame.payload);
+          // Share with the other pages so Prescription can report on it and
+          // Evidence can highlight its condition and drug names.
+          pushRecommendation(frame.payload);
           // Re-yield so the renderer re-runs now that the payload has landed.
           yield { content: [{ type: "text", text }] };
         }
