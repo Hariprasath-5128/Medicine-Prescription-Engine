@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 import sys
@@ -86,6 +86,7 @@ def evaluate(model, loader, device, drugs: list[str], k_values=(1, 3, 5)) -> dic
     preds, golds = [], []
     hits = {k: [] for k in k_values}
     recalls = {k: [] for k in k_values}
+    n_relevant: list[int] = []
 
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -103,6 +104,7 @@ def evaluate(model, loader, device, drugs: list[str], k_values=(1, 3, 5)) -> dic
             relevant = set(torch.nonzero(truth).flatten().cpu().tolist())
             if not relevant:
                 continue
+            n_relevant.append(len(relevant))
             for k in k_values:
                 topk = set(row.topk(min(k, len(drugs))).indices.cpu().tolist())
                 inter = len(topk & relevant)
@@ -119,6 +121,17 @@ def evaluate(model, loader, device, drugs: list[str], k_values=(1, 3, 5)) -> dic
     for k in k_values:
         metrics[f"drug_precision@{k}"] = round(float(np.mean(hits[k])), 4) if hits[k] else 0.0
         metrics[f"drug_recall@{k}"] = round(float(np.mean(recalls[k])), 4) if recalls[k] else 0.0
+
+    # Drug Precision@K is a weak metric here and must be read with care: the
+    # average test row has ~78 of 2,044 drugs marked relevant (up to 180 for
+    # "Pain"), because relevance is the condition->drug lookup table. A trivial
+    # baseline - oracle condition + most popular drug - scores 1.00 @1, i.e.
+    # BETTER than any trained model. Report the honest signal alongside it.
+    metrics["drug_mean_relevant"] = round(float(np.mean(n_relevant)), 1) if n_relevant else 0.0
+    metrics["drug_random_baseline@1"] = round(
+        float(np.mean(n_relevant)) / max(len(drugs), 1), 4) if n_relevant else 0.0
+    metrics["_note"] = ("drug_precision@K is inflated by large relevant sets; "
+                        "condition_macro_f1 is the metric that measures skill")
     return metrics
 
 
@@ -175,11 +188,43 @@ def main() -> int:
     tokenizer = AutoTokenizer.from_pretrained(encoder)
     make = lambda df: ReviewDataset(df, tokenizer, condition_ids, drug_ids,  # noqa: E731
                                     rc["max_length"], condition_drugs)
-    train_loader = DataLoader(make(train_df), batch_size=args.batch_size, shuffle=True)
+    # A balanced sampler complements the weighted loss: weighting changes how
+    # much a rare example counts, sampling changes how often it is seen.
+    sampler_mode = rc.get("sampler", "none")
+    sampler = None
+    if sampler_mode != "none":
+        counts = train_df["condition"].value_counts()
+        if sampler_mode == "sqrt_balanced":
+            per_class = {c: 1.0 / (v ** 0.5) for c, v in counts.items()}
+        else:  # full inversion - flattens the distribution completely
+            per_class = {c: 1.0 / v for c, v in counts.items()}
+        row_w = train_df["condition"].map(per_class).astype(float).values
+        sampler = WeightedRandomSampler(torch.as_tensor(row_w, dtype=torch.double),
+                                        num_samples=len(train_df), replacement=True)
+        print(f"sampler: {sampler_mode}")
+
+    train_loader = DataLoader(make(train_df), batch_size=args.batch_size,
+                              sampler=sampler, shuffle=sampler is None)
     val_loader = DataLoader(make(val_df), batch_size=args.batch_size)
     test_loader = DataLoader(make(test_df), batch_size=args.batch_size)
 
-    model = DrugRecommender(encoder, len(conditions), len(drugs)).to(device)
+    model = DrugRecommender(encoder, len(conditions), len(drugs),
+                            label_smoothing=rc.get("label_smoothing", 0.0)).to(device)
+
+    # Class-balanced weights (Cui et al. 2019): w_c = (1-beta)/(1-beta^n_c),
+    # normalised to mean 1 so the loss scale - and thus the learning rate -
+    # stays comparable to an unweighted run.
+    beta = float(rc.get("class_balanced_beta", 0) or 0)
+    if beta > 0:
+        counts = train_df["condition"].value_counts()
+        n = torch.tensor([float(counts.get(c, 1)) for c in conditions])
+        w = (1.0 - beta) / (1.0 - torch.pow(beta, n))
+        w = w / w.mean()
+        model.set_class_weights(w.to(device))
+        print(f"class-balanced loss: beta={beta}, weight range "
+              f"{w.min():.2f}-{w.max():.2f} (rarest class weighted "
+              f"{w.max() / w.min():.1f}x the most common)")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(rc["learning_rate"]),
                                   weight_decay=rc.get("weight_decay", 0.01))
 
